@@ -1,0 +1,232 @@
+import requests
+from bs4 import BeautifulSoup
+
+FILLER_TEXT = """League of Legends Wiki
+
+Want to contribute to this wiki? Sign up for an account, and get started ! You can even turn off ads in your preferences . Come join the LoL Wiki community Discord server !
+
+READ MORE
+
+Surrounded around the Shuriman Continent are several clans of Brackern , including clans in the Shuriman desert.
+
+The Dormun are gigantic, slow-moving creatures protected with large chitinous plates covering their body. In the harsh conditions of Shurima they have evolved to survive the perpetual drought by utilizing an unknown sense to locate hidden reservoirs of water. Incidentally, certain nomadic tribes have built themselves a permanent home upon the backs of these beasts where they clean the creature and hunt any airborne pests who venture near.
+
+Desert goats that travel in herds.
+
+Mwatis are goatlike creatures with large plated casques on their heads. Mwati wool and plate are prised for felting and insulation.
+
+Gigantic scarabs that roam in swarms, looking for unfortunate travelers to feed on. They seem to be common prey for Rammus .
+
+Beside the Xer'Sai, other creatures from the Void, referred to as 'outerbeasts', can be found in the desert.
+
+Large and aggressive minotaur-like creatures. They are humpbacked quadrupeds with long limbs and thick horns.
+
+A breed of camels native to the deserts of Shurima and are used by caravans as well as common folk as primary mode of  transportation. Despite being well-suited for lengthy travels in the desert landscape, they are still prey to a many predator such as the Xer'Sai.
+
+Sandswimmers
+
+Sandswimmers are massive quadrupedal creatures that traverse the Shuriman desert in cyclical patterns. They got their name due to their preferred method of travel. Their narrow bodies and webbed feet are perfectly design for swimming under the sand. They feed on bugs and other small creatures most desert beasts ignore. Scavengers will often memorize the predictable paths these creatures take, and jump onto their backs to ride as far as they wish.
+
+The Skallashi are large quadrupedal herbivores. These hardy beasts of burden are common across Shurima, ideally suited to the harsh desert environment. Their key body feature is their long legs. Notoriously bad-tempered, they are nevertheless treated with great reverence. Their brown hides are often painted with sacred symbols of protection, and their horns hung with totems and charms. While these creatures are mostly used for travel and carrying heavy loads, on some larger skallashi people are able to built miniature rooms for more comfortable travel. To own one is often considered a sign of considerable prosperity.
+"""
+
+# 1. Get all champion entries from the list
+def get_all_champion_entries():
+    url = "https://leagueoflegends.fandom.com/wiki/List_of_champions"
+    resp = requests.get(url)
+    soup = BeautifulSoup(resp.text, "html.parser")
+    table = soup.find("table", class_="article-table")
+    champions = []
+    for row in table.find_all("tr")[1:]:
+        cols = row.find_all("td")
+        if len(cols) < 1:
+            continue
+        first_td = cols[0]
+        first_a = first_td.find("a", href=True)
+        if not first_a:
+            continue
+        stats_link = "https://leagueoflegends.fandom.com" + first_a['href']
+        lore_link = stats_link[:-4] if stats_link.endswith('/LoL') else stats_link
+        all_a = first_td.find_all("a")
+        if len(all_a) < 2:
+            continue
+        name_title_a = all_a[1]
+        strings = list(name_title_a.stripped_strings)
+        if len(strings) == 2:
+            name, title = strings
+        elif len(strings) == 1:
+            name, title = strings[0], ""
+        else:
+            name, title = "", ""
+        champions.append({
+            "name": name,
+            "title": title,
+            "url_stats": stats_link,
+            "url_lore": lore_link,
+        })
+    return champions
+
+# 2. Champion stat extraction
+def extract_champ_stats(url_stats, champ_name):
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    resp = requests.get(url_stats, headers=headers)
+    soup = BeautifulSoup(resp.text, "html.parser")
+    base = champ_name.replace(" ", "_")
+    keys = [
+        ("health", f"Health_{base}"),
+        ("health_per_level", f"Health_{base}_lvl"),
+        ("health_regen", f"HealthRegen_{base}"),
+        ("health_regen_per_level", f"HealthRegen_{base}_lvl"),
+        ("armor", f"Armor_{base}"),
+        ("armor_per_level", f"Armor_{base}_lvl"),
+        ("attack_damage", f"AttackDamage_{base}"),
+        ("attack_damage_per_level", f"AttackDamage_{base}_lvl"),
+        ("magic_resist", f"MagicResist_{base}"),
+        ("magic_resist_per_level", f"MagicResist_{base}_lvl"),
+        ("move_speed", f"MovementSpeed_{base}"),
+        ("attack_range", f"AttackRange_{base}"),
+        ("attack_speed_per_level", f"AttackSpeedBonus_{base}_lvl"),
+    ]
+    stats = {}
+    for label, id_ in keys:
+        span = soup.find('span', {'id': id_})
+        value = ''
+        if span:
+            value = span.text.strip()
+            next_sib = span.next_sibling
+            if next_sib and isinstance(next_sib, str) and next_sib.strip() in ['%', '/']:
+                value += next_sib.strip()
+        stats[label] = value
+
+    def extract_resource_and_regen(soup, champ_name):
+        resource_type = None
+        resource_regen = None
+        resource_regen_per_level = None
+        for div in soup.find_all('div', class_='pi-smart-data-value'):
+            label_div = div.find('div', class_='pi-faux-label')
+            if not label_div:
+                continue
+            label_text = label_div.get_text(strip=True).lower()
+            if 'mana' in label_text:
+                resource_type = 'Mana'
+            elif 'energy' in label_text:
+                resource_type = 'Energy'
+            elif 'resource' in label_text:
+                possible = label_text.replace('resource', '').strip(' .:')
+                if possible:
+                    resource_type = possible.capitalize()
+            for span in div.find_all('span', id=True):
+                if f"ResourceRegen_{champ_name}" in span['id']:
+                    resource_regen = span.text.strip()
+                if f"ResourceRegen_{champ_name}_lvl" in span['id']:
+                    resource_regen_per_level = span.text.strip()
+            if not resource_regen:
+                div_text = div.get_text(" ", strip=True)
+                value = div_text.replace(label_div.get_text(strip=True), '').strip()
+                if value and not resource_regen:
+                    resource_regen = value
+        return resource_type, resource_regen, resource_regen_per_level
+
+    resource_type, resource_regen, resource_regen_per_level = extract_resource_and_regen(soup, champ_name)
+    stats["resource"] = resource_type if resource_type else ""
+    stats["resource_regen"] = resource_regen if resource_regen else ""
+    stats["resource_regen_per_level"] = resource_regen_per_level if resource_regen_per_level else ""
+    return stats
+
+# 3. Abilities extraction
+def extract_abilities_in_order(url_stats):
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    resp = requests.get(url_stats, headers=headers)
+    soup = BeautifulSoup(resp.text, "html.parser")
+    skill_order = [
+        ("skill_innate", "Passive"),
+        ("skill_q", "Q"),
+        ("skill_w", "W"),
+        ("skill_e", "E"),
+        ("skill_r", "R"),
+    ]
+    abilities = []
+    for suffix, slot in skill_order:
+        skill_div = soup.find('div', class_=lambda c: c and suffix in c)
+        if not skill_div:
+            continue
+        name = None
+        h3 = skill_div.find('h3')
+        if h3:
+            span = h3.find('span', class_='mw-headline')
+            if span:
+                name = span.text.strip()
+            else:
+                name = h3.text.strip()
+        if not name:
+            pi_title = skill_div.find('h2', class_='pi-title')
+            if pi_title:
+                name = pi_title.text.strip()
+        if not name:
+            name = slot
+        desc = ''
+        for vdiv in skill_div.find_all('div', style=lambda v: v and "vertical-align:top" in v):
+            for p in vdiv.find_all('p', recursive=False):
+                desc += p.get_text(" ", strip=True) + "\n"
+        if not desc:
+            for p in skill_div.find_all('p', recursive=True):
+                desc += p.get_text(" ", strip=True) + "\n"
+        desc = desc.replace('\xa0', ' ').strip()
+        abilities.append({'slot': slot, 'name': name, 'description': desc})
+    return abilities
+
+# 4. Lore extraction (with length-based trimming)
+def extract_champ_lore(url_lore):
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    resp = requests.get(url_lore, headers=headers)
+    soup = BeautifulSoup(resp.text, "html.parser")
+    paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all('p')]
+    lore = "\n\n".join(paragraphs)
+    trim_len = len(FILLER_TEXT)
+    lore = lore[trim_len:].lstrip()
+    marker_end = "Biography"
+    idx_end = lore.find(marker_end)
+    if idx_end != -1:
+        lore = lore[:idx_end].strip()
+    lines = [line for line in lore.split('\n') if line.strip()]
+    lore = "\n".join(lines)
+    return lore
+
+# 5. Master function for one champ given correct URLs
+def extract_all_champ_info(name, url_stats, url_lore):
+    stats = extract_champ_stats(url_stats, name)
+    abilities = extract_abilities_in_order(url_stats)
+    lore = extract_champ_lore(url_lore)
+    return {
+        'champion': name,
+        'stats': stats,
+        'abilities': abilities,
+        'lore': lore
+    }
+
+# ----------- Usage example: All champions -----------
+if __name__ == "__main__":
+    champions = get_all_champion_entries()
+    print("Total champions found:", len(champions))
+    for champ in champions[:2]:  # for demo, just 2
+        print("\n=====", champ['name'], "=====")
+        data = extract_all_champ_info(champ['name'], champ['url_stats'], champ['url_lore'])
+        from pprint import pprint
+        pprint(data['stats'])
+        print("\nABILITIES:")
+        for ab in data['abilities']:
+            print(f"=== {ab['slot']}: {ab['name']} ===\n{ab['description']}\n")
+        print("LORE PREVIEW:\n", data['lore'][:500])
+
+import json
+
+all_data = []
+for champ in champions:
+    data = extract_all_champ_info(champ['name'], champ['url_stats'], champ['url_lore'])
+    data['title'] = champ['title']
+    all_data.append(data)
+
+with open("lol_champions.jsonl", "w", encoding="utf-8") as f:
+    for example in all_data:
+        f.write(json.dumps(example, ensure_ascii=False) + "\n")
+
